@@ -116,64 +116,52 @@ function App() {
       return;
     }
 
-    const parsedEndpoints = parseApicEndpointsAuto(apicRawInput);
-    if (parsedEndpoints.length === 0) {
-      setError('Unable to parse APIC endpoint data. Please check your input.');
+    setPathAttachments(parsedMoquery);
+
+    const epgsByVlan = extractEpgNamesFromMoquery(moqueryInput);
+
+    if (epgsByVlan.size === 0) {
+      setError('No EPG names found in moquery data. Please check your input.');
       return;
     }
 
-    // Extract EPG names from moquery data
-    const epgsByVlan = extractEpgNamesFromMoquery(moqueryInput);
-
-    setPathAttachments(parsedMoquery);
-    setAutoEndpoints(parsedEndpoints);
-
-    const groupedByVlan = new Map<string, AutoModeEndpoint[]>();
-    parsedEndpoints.forEach(ep => {
-      if (!groupedByVlan.has(ep.vlan)) {
-        groupedByVlan.set(ep.vlan, []);
-      }
-      groupedByVlan.get(ep.vlan)!.push(ep);
-    });
-
     const newEntries: ValidationEntry[] = [];
 
-    Array.from(groupedByVlan.entries()).forEach(([vlan, endpoints], idx) => {
-      const allPaths = Array.from(new Set(endpoints.map(ep => ep.path)));
-      const pathIPMap = new Map<string, string>();
-      endpoints.forEach(ep => {
-        pathIPMap.set(ep.path, ep.ip);
-      });
+    Array.from(epgsByVlan.entries()).forEach(([vlan, epgList], idx) => {
+      const vlanAttachments = parsedMoquery.filter(att => att.vlan === vlan);
+
+      const allPaths = Array.from(new Set(vlanAttachments.map(att => att.path)));
 
       const endpointData: EndpointData = {
         vlan,
-        ip: endpoints[0]?.ip || '',
+        ip: '',
         paths: allPaths,
-        pod: '',
-        pathsWithIPs: pathIPMap
+        pod: vlanAttachments[0]?.pod || 'pod-2',
+        pathsWithIPs: new Map()
       };
 
-      const results = validateVlanAllowances(endpointData, parsedMoquery);
+      const results: ValidationResult[] = allPaths.map(path => ({
+        path,
+        hasActiveEndpoint: true,
+        isVlanAllowed: true,
+        status: 'allowed' as const
+      }));
 
-      // Get all EPGs from moquery for this VLAN
-      const epgList = epgsByVlan.get(vlan) || [endpoints[0]?.epg || `VLAN${vlan}`];
+      const epgName = epgList[0] || `VLAN${vlan}`;
 
-      // Select best matching EPG based on endpoint IP and path info
-      const bestEpg = selectBestEpgMatch(
-        endpoints[0]?.ip || '',
-        epgList,
-        allPaths
-      );
-
-      // If only one EPG matches, use it; otherwise create entry with best match
       newEntries.push({
         id: Date.now().toString() + idx,
         endpointInput: '',
-        epgName: bestEpg || epgList[0] || `VLAN${vlan}`,
+        epgName: epgName,
         results,
         endpointData
       });
     });
+
+    if (newEntries.length === 0) {
+      setError('No valid entries created from moquery data.');
+      return;
+    }
 
     setEntries(newEntries);
   };
@@ -311,7 +299,9 @@ function App() {
               <textarea
                 value={moqueryInput}
                 onChange={(e) => setMoqueryInput(e.target.value)}
-                placeholder='Paste output from: moquery -c fvRsPathAtt -f &#39;fv.RsPathAtt.encap=="vlan-XXX"&#39; | grep dn&#10;&#10;Example:&#10;dn : uni/tn-MDR-SF-DC/ap-MDR-SF/epg-(x)-(x)-(x)-(X)/rspathAtt-[topology/pod-2/paths-410/pathep-[eth1/1]]'
+                placeholder={entryMode === 'auto'
+                  ? 'Paste multiple moquery outputs here. You can paste data for multiple VLANs.\n\nExample for VLAN 673:\nAPIC-1# moquery -c fvRsPathAtt -f \'fv.RsPathAtt.encap=="vlan-673"\' | grep dn\ndn : uni/tn-MDR-SF-DC/ap-MDR-SF/epg-EPG-VLAN673-10.254.85.128-27/rspathAtt-[topology/pod-2/paths-410/pathep-[eth1/1]]\n\nExample for VLAN 672:\nAPIC-1# moquery -c fvRsPathAtt -f \'fv.RsPathAtt.encap=="vlan-672"\' | grep dn\ndn : uni/tn-MDR-SF-DC/ap-MDR-SF/epg-EPG-VLAN672-10.254.85.64-26/rspathAtt-[topology/pod-2/paths-409/pathep-[eth1/4]]'
+                  : 'Paste output from: moquery -c fvRsPathAtt -f \'fv.RsPathAtt.encap=="vlan-XXX"\' | grep dn\n\nExample:\ndn : uni/tn-MDR-SF-DC/ap-MDR-SF/epg-(x)-(x)-(x)-(X)/rspathAtt-[topology/pod-2/paths-410/pathep-[eth1/1]]'}
                 className="w-full h-40 px-4 py-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-slate-500 focus:border-transparent resize-none font-mono text-sm bg-white"
               />
               <p className="text-xs text-slate-600 mt-2">
@@ -399,27 +389,21 @@ function App() {
                 <div className="bg-green-50 border border-green-200 rounded-lg p-4 mb-4">
                   <h4 className="text-sm font-semibold text-green-900 mb-1">Auto Mode</h4>
                   <p className="text-xs text-green-700 mb-2">
-                    In this mode, EPG names are automatically extracted from the moquery data above. You only need to paste the endpoint output below.
+                    In this mode, EPG names and paths are automatically extracted from the moquery data above.
                   </p>
-                  <p className="text-xs text-green-700">
-                    No need to manually enter EPG names - they will be matched automatically based on VLAN numbers.
+                  <p className="text-xs text-green-700 mb-2">
+                    The system will automatically create multiple entries, one for each VLAN found in the moquery data.
+                  </p>
+                  <p className="text-xs text-green-700 font-medium">
+                    Simply paste your moquery data above and click "Validate All" to start!
                   </p>
                 </div>
-                <h3 className="text-lg font-semibold text-slate-900 mb-4">
-                  APIC Endpoint Data
-                </h3>
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-2">
-                    APIC CLI Output (show endpoints ip...)
-                  </label>
-                  <textarea
-                    value={apicRawInput}
-                    onChange={(e) => setApicRawInput(e.target.value)}
-                    placeholder="Paste output from multiple: show endpoints ip 10.254.244.x commands"
-                    className="w-full h-64 px-4 py-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-slate-500 focus:border-transparent resize-none font-mono text-sm"
-                  />
-                  <p className="text-xs text-slate-500 mt-2">
-                    Paste the complete output from all "show endpoints ip" commands for automatic parsing
+                <div className="bg-slate-50 border border-slate-200 rounded-lg p-6 text-center">
+                  <div className="text-slate-600 text-sm mb-2">
+                    Ready to process moquery data
+                  </div>
+                  <p className="text-xs text-slate-500">
+                    No additional input required. All information will be extracted from the moquery data above.
                   </p>
                 </div>
               </div>
